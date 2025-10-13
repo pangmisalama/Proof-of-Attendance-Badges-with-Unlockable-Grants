@@ -6,6 +6,10 @@
 (define-constant err-invalid-training (err u104))
 (define-constant err-grant-not-available (err u105))
 
+(define-constant err-not-badge-owner (err u108))
+(define-constant err-transfer-to-self (err u109))
+(define-constant err-invalid-delegation (err u110))
+
 (define-data-var next-badge-id uint u1)
 (define-data-var next-training-id uint u1)
 (define-data-var next-grant-id uint u1)
@@ -233,4 +237,103 @@
 
 (define-read-only (get-current-grant-id)
   (var-get next-grant-id)
+)
+
+
+(define-map badge-delegations
+  { badge-id: uint }
+  { delegate: (optional principal), delegated-at: uint }
+)
+
+(define-map transfer-history
+  { badge-id: uint, transfer-index: uint }
+  { from: principal, to: principal, transferred-at: uint }
+)
+
+(define-data-var next-transfer-index uint u0)
+
+(define-public (transfer-badge (badge-id uint) (recipient principal))
+  (let (
+    (badge (unwrap! (map-get? badges { badge-id: badge-id }) err-not-found))
+    (current-block stacks-block-height)
+    (current-owner (get owner badge))
+    (sender-badge-data (unwrap! (map-get? user-badges { user: tx-sender }) err-not-badge-owner))
+    (recipient-badge-data (default-to { badge-count: u0, badge-ids: (list) } (map-get? user-badges { user: recipient })))
+    (transfer-idx (var-get next-transfer-index))
+  )
+    (asserts! (is-eq tx-sender current-owner) err-not-badge-owner)
+    (asserts! (not (is-eq tx-sender recipient)) err-transfer-to-self)
+    
+    (map-set badges
+      { badge-id: badge-id }
+      (merge badge { owner: recipient })
+    )
+    
+    (map-set user-badges
+      { user: tx-sender }
+      {
+        badge-count: (- (get badge-count sender-badge-data) u1),
+        badge-ids: (filter filter-badge-id (get badge-ids sender-badge-data))
+      }
+    )
+    
+    (map-set user-badges
+      { user: recipient }
+      {
+        badge-count: (+ (get badge-count recipient-badge-data) u1),
+        badge-ids: (unwrap! (as-max-len? (append (get badge-ids recipient-badge-data) badge-id) u100) (err u999))
+      }
+    )
+    
+    (map-set transfer-history
+      { badge-id: badge-id, transfer-index: transfer-idx }
+      { from: tx-sender, to: recipient, transferred-at: current-block }
+    )
+    
+    (var-set next-transfer-index (+ transfer-idx u1))
+    (ok true)
+  )
+)
+
+(define-public (delegate-badge (badge-id uint) (delegate principal))
+  (let (
+    (badge (unwrap! (map-get? badges { badge-id: badge-id }) err-not-found))
+    (current-block stacks-block-height)
+  )
+    (asserts! (is-eq tx-sender (get owner badge)) err-not-badge-owner)
+    (map-set badge-delegations
+      { badge-id: badge-id }
+      { delegate: (some delegate), delegated-at: current-block }
+    )
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation (badge-id uint))
+  (let (
+    (badge (unwrap! (map-get? badges { badge-id: badge-id }) err-not-found))
+  )
+    (asserts! (is-eq tx-sender (get owner badge)) err-not-badge-owner)
+    (map-delete badge-delegations { badge-id: badge-id })
+    (ok true)
+  )
+)
+
+(define-private (filter-badge-id (id uint))
+  (not (is-eq id (var-get next-badge-id)))
+)
+
+(define-read-only (get-badge-delegation (badge-id uint))
+  (map-get? badge-delegations { badge-id: badge-id })
+)
+
+(define-read-only (get-transfer-history (badge-id uint) (transfer-index uint))
+  (map-get? transfer-history { badge-id: badge-id, transfer-index: transfer-index })
+)
+
+(define-read-only (is-delegated-to (badge-id uint) (checker principal))
+  (match (map-get? badge-delegations { badge-id: badge-id })
+    delegation (is-eq (some checker) (get delegate delegation))
+    false
+  )
 )
