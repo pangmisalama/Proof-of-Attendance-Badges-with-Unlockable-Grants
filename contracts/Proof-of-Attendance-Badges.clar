@@ -10,6 +10,12 @@
 (define-constant err-transfer-to-self (err u109))
 (define-constant err-invalid-delegation (err u110))
 
+(define-constant tier-bronze u100)
+(define-constant tier-silver u250)
+(define-constant tier-gold u500)
+(define-constant tier-platinum u1000)
+(define-constant err-tier-too-low (err u111))
+
 (define-data-var next-badge-id uint u1)
 (define-data-var next-training-id uint u1)
 (define-data-var next-grant-id uint u1)
@@ -336,4 +342,105 @@
     delegation (is-eq (some checker) (get delegate delegation))
     false
   )
+)
+
+(define-map user-reputation
+  { user: principal }
+  { 
+    reputation-score: uint,
+    current-tier: (string-ascii 16),
+    last-updated: uint,
+    unique-trainings: uint
+  }
+)
+
+(define-map tiered-grants
+  { tiered-grant-id: uint }
+  {
+    amount: uint,
+    required-tier: (string-ascii 16),
+    available-slots: uint,
+    creator: principal,
+    expiry-block: uint
+  }
+)
+
+(define-data-var next-tiered-grant-id uint u1)
+
+(define-map tiered-grant-claims
+  { tiered-grant-id: uint, claimer: principal }
+  { claimed: bool }
+)
+
+(define-public (calculate-reputation)
+  (let (
+    (user-data (default-to { badge-count: u0, badge-ids: (list) } (map-get? user-badges { user: tx-sender })))
+    (badge-count (get badge-count user-data))
+    (reputation-score (* badge-count u50))
+    (tier (if (>= reputation-score tier-platinum) "platinum"
+           (if (>= reputation-score tier-gold) "gold"
+           (if (>= reputation-score tier-silver) "silver" "bronze"))))
+  )
+    (map-set user-reputation
+      { user: tx-sender }
+      {
+        reputation-score: reputation-score,
+        current-tier: tier,
+        last-updated: stacks-block-height,
+        unique-trainings: badge-count
+      }
+    )
+    (ok { score: reputation-score, tier: tier })
+  )
+)
+
+(define-public (create-tiered-grant (amount uint) (required-tier (string-ascii 16)) (slots uint) (duration uint))
+  (let (
+    (tiered-grant-id (var-get next-tiered-grant-id))
+  )
+    (try! (stx-transfer? (* amount slots) tx-sender (as-contract tx-sender)))
+    (map-set tiered-grants
+      { tiered-grant-id: tiered-grant-id }
+      {
+        amount: amount,
+        required-tier: required-tier,
+        available-slots: slots,
+        creator: tx-sender,
+        expiry-block: (+ stacks-block-height duration)
+      }
+    )
+    (var-set next-tiered-grant-id (+ tiered-grant-id u1))
+    (ok tiered-grant-id)
+  )
+)
+
+(define-public (claim-tiered-grant (tiered-grant-id uint))
+  (let (
+    (grant (unwrap! (map-get? tiered-grants { tiered-grant-id: tiered-grant-id }) err-not-found))
+    (user-rep (unwrap! (map-get? user-reputation { user: tx-sender }) err-not-found))
+  )
+    (asserts! (<= stacks-block-height (get expiry-block grant)) err-grant-not-available)
+    (asserts! (> (get available-slots grant) u0) err-grant-not-available)
+    (asserts! (is-none (map-get? tiered-grant-claims { tiered-grant-id: tiered-grant-id, claimer: tx-sender })) err-already-claimed)
+    (asserts! (is-eq (get current-tier user-rep) (get required-tier grant)) err-tier-too-low)
+    
+    (try! (as-contract (stx-transfer? (get amount grant) tx-sender tx-sender)))
+    (map-set tiered-grant-claims
+      { tiered-grant-id: tiered-grant-id, claimer: tx-sender }
+      { claimed: true }
+    )
+    (map-set tiered-grants
+      { tiered-grant-id: tiered-grant-id }
+      (merge grant { available-slots: (- (get available-slots grant) u1) })
+    )
+    (ok (get amount grant))
+  )
+)
+
+(define-read-only (get-user-reputation (user principal))
+  (map-get? user-reputation { user: user })
+)
+
+(define-read-only (get-tiered-grant (tiered-grant-id uint))
+  (map-get? tiered-grants { tiered-grant-id: tiered-grant-id })
 )
